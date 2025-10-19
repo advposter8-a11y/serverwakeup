@@ -2,108 +2,120 @@ name: Wake Render Sites (WhatsApp Alerts + Recovery)
 
 on:
   schedule:
-    - cron: '15 6-21/2 * * *'  # هر ۲ ساعت از ساعت 06:15 UTC (09:45 ایران) تا 21:15 UTC
-  workflow_dispatch: {}  # اجرای دستی برای تست
+    - cron: '30 0-23/2 * * *'  # دقیقه 30 هر ۲ ساعت UTC
+  workflow_dispatch: {}  # اجرای دستی
 
 jobs:
   wake:
     runs-on: ubuntu-latest
     steps:
+      # ================= Restore cache =================
+      - name: Restore site status cache
+        uses: actions/cache@v3
+        with:
+          path: .cache/site_status.log
+          key: site-status-${{ runner.os }}-v1
+          restore-keys: |
+            site-status-${{ runner.os }}-v1
+
+      # ================= Wake Script =================
       - name: Wake and Monitor Render Sites
         run: |
-          # ================= Debug Setup =================
-          set -e   # در صورت خطا workflow متوقف شود
-          set -x   # تمام دستورها و پارامترها چاپ شوند
+          set -e
+          mkdir -p .cache
+          state_file=".cache/site_status.log"
+          touch "$state_file"
 
-          echo "=== Render Wake Script with WhatsApp Alerts and Recovery ==="
+          # ---------- تبدیل زمان UTC به ایران ----------
           current_hour=$(date -u +"%H")
-          echo "Current UTC hour: $current_hour"
+          current_minute=$(date -u +"%M")
+          current_hour_iran=$((10#$current_hour + 3))
+          current_minute_iran=$((10#$current_minute + 30))
+          if [ $current_minute_iran -ge 60 ]; then
+            current_minute_iran=$((current_minute_iran - 60))
+            current_hour_iran=$((current_hour_iran + 1))
+          fi
+          current_hour_iran=$((current_hour_iran % 24))
+          echo "🕒 Current Iran time: ${current_hour_iran}:${current_minute_iran}"
 
-          # فقط در محدودهٔ مجاز (۶ تا ۲۱ UTC ≈ ۹:۱۵ تا ۵ صبح ایران)
-          if [ $current_hour -ge 6 ] && [ $current_hour -le 21 ]; then
-            echo "🟢 Inside active hours, checking Render sites..."
+          # ---------- بازه استراحت: 05:00–09:30 ----------
+          if [ $current_hour_iran -ge 5 ] && [ $current_hour_iran -lt 9 ]; then
+              echo "🛌 Outside active hours (05:00–09:30). Exiting."
+              exit 0
+          elif [ $current_hour_iran -eq 9 ] && [ $current_minute_iran -lt 30 ]; then
+              echo "🛌 Outside active hours (05:00–09:30). Exiting."
+              exit 0
+          fi
+          echo "🟢 Inside active hours. Running workflow..."
 
-            # لیست سایت‌ها
-            sites=(
-              "https://n8n-vn5b.onrender.com/"
-              "https://cl-s5ej.onrender.com/"
-              "https://bitbrief.click/"
-              "https://trrigeractive.onrender.com/"
-              "https://n8nyoutube-ullx.onrender.com/"
-              "https://n8nrunner.onrender.com/"
-              "https://kadoo.click/"
-              "https://crawl-f2mb.onrender.com/"
-              "https://server2-sy6g.onrender.com/health"
-              "https://neurobackend.onrender.com/"
-              "https://license-krks.onrender.com/"
-              "https://api1-nsqh.onrender.com/"
-            )
+          # ---------- لیست سایت‌ها ----------
+          sites=(
+            "https://n8n-vn5b.onrender.com/"
+            "https://cl-s5ej.onrender.com/"
+            "https://bitbrief.click/"
+            "https://trrigeractive.onrender.com/"
+            "https://n8nyoutube-ullx.onrender.com/"
+            "https://n8nrunner.onrender.com/"
+            "https://kadoo.click/"
+            "https://crawl-f2mb.onrender.com/"
+            "https://server2-sy6g.onrender.com/health"
+            "https://neurobackend.onrender.com/"
+            "https://license-krks.onrender.com/"
+            "https://api1-nsqh.onrender.com/"
+          )
 
-            # اطلاعات واتساپ از CallMeBot
-            phone="989197934854"
-            apikey="4287648"
+          phone="989197934854"
+          apikey="4287648"
 
-            # مسیر ذخیره وضعیت قبلی برای تشخیص بازگشت سرور
-            mkdir -p .cache
-            state_file=".cache/site_status.log"
-            touch "$state_file"
-            echo "State file path: $state_file"
-            echo "Current state file content:"
-            cat "$state_file" || echo "(empty)"
-
-            # ================= Loop over sites =================
-            for site in "${sites[@]}"; do
-              echo "🔹 Checking $site"
+          # ---------- بررسی سایت‌ها ----------
+          for site in "${sites[@]}"; do
+              echo "🔹 Checking $site ..."
               success=false
-
               for i in {1..10}; do
-                echo "Try #$i for $site"
-                # خروجی کامل curl برای debug
-                if curl -v -I "$site" 2>&1 | tee /tmp/curl.log | grep -q "200\|301\|302"; then
-                  echo "$site is awake ✅"
-                  success=true
-                  break
-                fi
-                echo "Sleeping 15s before retry..."
-                sleep 15
+                  if curl -s -I "$site" | grep -q "200\|301\|302"; then
+                      success=true
+                      break
+                  fi
+                  echo "Try #$i failed. Retrying in 15s..."
+                  sleep 15
               done
 
-              # بررسی وضعیت فعلی و قبلی
+              # ---------- بررسی وضعیت قبلی از cache ----------
               prev_status=$(grep "^$site " "$state_file" | awk '{print $2}' || echo "")
-              echo "Previous status: $prev_status"
 
+              # ---------- تصمیم گیری بر اساس curl واقعی ----------
               if [ "$success" = true ]; then
-                if [ "$prev_status" = "down" ]; then
-                  msg="✅ $site is back online!"
-                  echo "Sending recovery alert (WhatsApp): $msg"
-                  # برای تست، ارسال واقعی واتساپ غیرفعال شده، فقط echo:
-                  echo "(Test mode) Would send WhatsApp: $msg"
-                  # اگر میخوای واقعی ارسال بشه، خط زیر رو از کامنت خارج کن:
-                  # curl -G --data-urlencode "phone=$phone" --data-urlencode "text=$msg" --data-urlencode "apikey=$apikey" "https://api.callmebot.com/whatsapp.php"
-                fi
-                # به‌روزرسانی وضعیت به up
-                grep -v "^$site " "$state_file" > "$state_file.tmp" || true
-                mv "$state_file.tmp" "$state_file" || true
-                echo "$site up" >> "$state_file"
+                  if [ "$prev_status" = "down" ]; then
+                      msg="✅ $site is back online!"
+                      echo "Sending recovery alert: $msg"
+                      curl -G --data-urlencode "phone=$phone" \
+                            --data-urlencode "text=$msg" \
+                            --data-urlencode "apikey=$apikey" \
+                            "https://api.callmebot.com/whatsapp.php"
+                  fi
+                  grep -v "^$site " "$state_file" > "$state_file.tmp" || true
+                  mv "$state_file.tmp" "$state_file" || true
+                  echo "$site up" >> "$state_file"
+                  echo "$site status: UP"
               else
-                echo "⚠️ $site did not wake up after 10 tries."
-                if [ "$prev_status" != "down" ]; then
-                  msg="⚠️ Render site DOWN: $site"
-                  echo "Sending alert (WhatsApp): $msg"
-                  # برای تست، ارسال واقعی واتساپ غیرفعال شده
-                  echo "(Test mode) Would send WhatsApp: $msg"
-                  # curl -G --data-urlencode "phone=$phone" --data-urlencode "text=$msg" --data-urlencode "apikey=$apikey" "https://api.callmebot.com/whatsapp.php"
-                fi
-                # به‌روزرسانی وضعیت به down
-                grep -v "^$site " "$state_file" > "$state_file.tmp" || true
-                mv "$state_file.tmp" "$state_file" || true
-                echo "$site down" >> "$state_file"
+                  if [ "$prev_status" != "down" ]; then
+                      msg="⚠️ Render site DOWN: $site"
+                      echo "Sending alert: $msg"
+                      curl -G --data-urlencode "phone=$phone" \
+                            --data-urlencode "text=$msg" \
+                            --data-urlencode "apikey=$apikey" \
+                            "https://api.callmebot.com/whatsapp.php"
+                  fi
+                  grep -v "^$site " "$state_file" > "$state_file.tmp" || true
+                  mv "$state_file.tmp" "$state_file" || true
+                  echo "$site down" >> "$state_file"
+                  echo "$site status: DOWN"
               fi
+          done
 
-              echo "State file after $site check:"
-              cat "$state_file"
-            done
-
-          else
-            echo "🛌 Outside active hours (5:00–9:15). Skipping wake-up checks."
-          fi
+      # ================= Save cache =================
+      - name: Save site status cache
+        uses: actions/cache@v3
+        with:
+          path: .cache/site_status.log
+          key: site-status-${{ runner.os }}-v1
