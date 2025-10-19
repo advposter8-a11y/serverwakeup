@@ -2,8 +2,8 @@ name: Wake Render Sites (WhatsApp Alerts + Recovery)
 
 on:
   schedule:
-    - cron: '15 6-21/2 * * *'  # از 9:15 صبح تا 5 صبح ایران (UTC 06:15 تا 21:15)
-  workflow_dispatch: {}  # اجرای دستی از GitHub Actions
+    - cron: '15 6-21/2 * * *'  # هر ۲ ساعت از ساعت 06:15 UTC (09:45 ایران) تا 21:15 UTC
+  workflow_dispatch: {}  # اجرای دستی برای تست
 
 jobs:
   wake:
@@ -11,8 +11,13 @@ jobs:
     steps:
       - name: Wake and Monitor Render Sites
         run: |
+          # ================= Debug Setup =================
+          set -e   # در صورت خطا workflow متوقف شود
+          set -x   # تمام دستورها و پارامترها چاپ شوند
+
           echo "=== Render Wake Script with WhatsApp Alerts and Recovery ==="
           current_hour=$(date -u +"%H")
+          echo "Current UTC hour: $current_hour"
 
           # فقط در محدودهٔ مجاز (۶ تا ۲۱ UTC ≈ ۹:۱۵ تا ۵ صبح ایران)
           if [ $current_hour -ge 6 ] && [ $current_hour -le 21 ]; then
@@ -42,13 +47,19 @@ jobs:
             mkdir -p .cache
             state_file=".cache/site_status.log"
             touch "$state_file"
+            echo "State file path: $state_file"
+            echo "Current state file content:"
+            cat "$state_file" || echo "(empty)"
 
+            # ================= Loop over sites =================
             for site in "${sites[@]}"; do
               echo "🔹 Checking $site"
               success=false
+
               for i in {1..10}; do
                 echo "Try #$i for $site"
-                if curl -s -I "$site" | grep -q "200\|301\|302"; then
+                # خروجی کامل curl برای debug
+                if curl -v -I "$site" 2>&1 | tee /tmp/curl.log | grep -q "200\|301\|302"; then
                   echo "$site is awake ✅"
                   success=true
                   break
@@ -58,35 +69,39 @@ jobs:
               done
 
               # بررسی وضعیت فعلی و قبلی
-              prev_status=$(grep "^$site " "$state_file" | awk '{print $2}')
+              prev_status=$(grep "^$site " "$state_file" | awk '{print $2}' || echo "")
+              echo "Previous status: $prev_status"
+
               if [ "$success" = true ]; then
-                # اگر قبلاً Down بوده، الان پیام بهبودی بفرست
                 if [ "$prev_status" = "down" ]; then
                   msg="✅ $site is back online!"
-                  echo "Sending recovery alert: $msg"
-                  curl -G --data-urlencode "phone=$phone" \
-                          --data-urlencode "text=$msg" \
-                          --data-urlencode "apikey=$apikey" \
-                          "https://api.callmebot.com/whatsapp.php"
+                  echo "Sending recovery alert (WhatsApp): $msg"
+                  # برای تست، ارسال واقعی واتساپ غیرفعال شده، فقط echo:
+                  echo "(Test mode) Would send WhatsApp: $msg"
+                  # اگر میخوای واقعی ارسال بشه، خط زیر رو از کامنت خارج کن:
+                  # curl -G --data-urlencode "phone=$phone" --data-urlencode "text=$msg" --data-urlencode "apikey=$apikey" "https://api.callmebot.com/whatsapp.php"
                 fi
                 # به‌روزرسانی وضعیت به up
-                grep -v "^$site " "$state_file" > "$state_file.tmp" && mv "$state_file.tmp" "$state_file"
+                grep -v "^$site " "$state_file" > "$state_file.tmp" || true
+                mv "$state_file.tmp" "$state_file" || true
                 echo "$site up" >> "$state_file"
               else
                 echo "⚠️ $site did not wake up after 10 tries."
-                # اگر قبلاً up بوده، الان پیام خطا بفرست
                 if [ "$prev_status" != "down" ]; then
                   msg="⚠️ Render site DOWN: $site"
-                  echo "Sending alert: $msg"
-                  curl -G --data-urlencode "phone=$phone" \
-                          --data-urlencode "text=$msg" \
-                          --data-urlencode "apikey=$apikey" \
-                          "https://api.callmebot.com/whatsapp.php"
+                  echo "Sending alert (WhatsApp): $msg"
+                  # برای تست، ارسال واقعی واتساپ غیرفعال شده
+                  echo "(Test mode) Would send WhatsApp: $msg"
+                  # curl -G --data-urlencode "phone=$phone" --data-urlencode "text=$msg" --data-urlencode "apikey=$apikey" "https://api.callmebot.com/whatsapp.php"
                 fi
                 # به‌روزرسانی وضعیت به down
-                grep -v "^$site " "$state_file" > "$state_file.tmp" && mv "$state_file.tmp" "$state_file"
+                grep -v "^$site " "$state_file" > "$state_file.tmp" || true
+                mv "$state_file.tmp" "$state_file" || true
                 echo "$site down" >> "$state_file"
               fi
+
+              echo "State file after $site check:"
+              cat "$state_file"
             done
 
           else
