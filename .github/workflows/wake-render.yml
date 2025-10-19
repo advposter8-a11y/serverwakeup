@@ -1,9 +1,9 @@
-name: Wake Render Sites (WhatsApp Alerts + Recovery)
+name: Wake Render Sites (WhatsApp Alerts + Recovery + Daily Summary)
 
 on:
   schedule:
-    - cron: '30 0-23/2 * * *'  # دقیقه 30 هر ۲ ساعت UTC
-  workflow_dispatch: {}  # اجرای دستی
+    - cron: '*/30 * * * *'  # هر نیم ساعت UTC
+  workflow_dispatch: {}
 
 jobs:
   wake:
@@ -26,7 +26,7 @@ jobs:
           state_file=".cache/site_status.log"
           touch "$state_file"
 
-          # ---------- تبدیل زمان UTC به ایران ----------
+          # ---------- زمان ایران ----------
           current_hour=$(date -u +"%H")
           current_minute=$(date -u +"%M")
           current_hour_iran=$((10#$current_hour + 3))
@@ -67,6 +67,8 @@ jobs:
           phone="989197934854"
           apikey="4287648"
 
+          summary="Daily Status Summary:\n"
+
           # ---------- بررسی سایت‌ها ----------
           for site in "${sites[@]}"; do
               echo "🔹 Checking $site ..."
@@ -80,10 +82,8 @@ jobs:
                   sleep 15
               done
 
-              # ---------- بررسی وضعیت قبلی از cache ----------
               prev_status=$(grep "^$site " "$state_file" | awk '{print $2}' || echo "")
 
-              # ---------- تصمیم گیری بر اساس curl واقعی ----------
               if [ "$success" = true ]; then
                   if [ "$prev_status" = "down" ]; then
                       msg="✅ $site is back online!"
@@ -97,6 +97,7 @@ jobs:
                   mv "$state_file.tmp" "$state_file" || true
                   echo "$site up" >> "$state_file"
                   echo "$site status: UP"
+                  summary+="$site: UP\n"
               else
                   if [ "$prev_status" != "down" ]; then
                       msg="⚠️ Render site DOWN: $site"
@@ -110,8 +111,19 @@ jobs:
                   mv "$state_file.tmp" "$state_file" || true
                   echo "$site down" >> "$state_file"
                   echo "$site status: DOWN"
+                  summary+="$site: DOWN\n"
               fi
           done
+
+          # ---------- ارسال پیام خلاصه روزانه ----------
+          # اگر ساعت 23:59 ایران است، پیام خلاصه بفرست
+          if [ "$current_hour_iran" -eq 23 ] && [ "$current_minute_iran" -ge 50 ]; then
+              echo "📩 Sending daily summary via WhatsApp..."
+              curl -G --data-urlencode "phone=$phone" \
+                    --data-urlencode "text=$summary" \
+                    --data-urlencode "apikey=$apikey" \
+                    "https://api.callmebot.com/whatsapp.php"
+          fi
 
       # ================= Save cache =================
       - name: Save site status cache
