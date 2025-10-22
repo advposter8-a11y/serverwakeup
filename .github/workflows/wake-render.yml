@@ -123,8 +123,8 @@ jobs:
           summary="📊 Daily Render Status Report ($iran_date):\n\n"
 
           # ---------- PARAMETERS you can tune ----------
-          MAX_ATTEMPTS=10      # number of retries per site (reduced for timely runs)
-          SLEEP_BETWEEN=15     # seconds between attempts
+          MAX_ATTEMPTS=15      # number of retries per site (reduced for timely runs)
+          SLEEP_BETWEEN=20     # seconds between attempts
 
           # ---------- iterate sites ----------
           for site in "${sites[@]}"; do
