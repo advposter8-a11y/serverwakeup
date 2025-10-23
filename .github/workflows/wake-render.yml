@@ -1,68 +1,136 @@
-import requests, time, datetime, pytz, sys
+name: Wake Render Sites (Smart Start/Stop + Daily WhatsApp Report)
 
-# تنظیمات اصلی
-SITES = ["https://n8n-vn5b.onrender.com/"]
-MAX_ATTEMPTS = 15
-CHECK_INTERVAL = 30  # ثانیه
-TIMEZONE = pytz.timezone("Asia/Tehran")
+on:
+  schedule:
+    - cron: '*/30 * * * *'   # هر ۳۰ دقیقه (UTC)
+  workflow_dispatch: {}       # اجرای دستی در صورت نیاز
 
-# محدوده‌ی زمانی فعال و غیرفعال
-ACTIVE_START = (9, 30)
-ACTIVE_END = (23, 55)
-STOP_WINDOW = [(5, 0), (5, 4)]
+jobs:
+  wake:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Restore state cache
+        uses: actions/cache@v3
+        with:
+          path: .cache/
+          key: site-state-${{ runner.os }}-v3
+          restore-keys: |
+            site-state-${{ runner.os }}-v3
 
-def iran_time():
-    return datetime.datetime.now(TIMEZONE)
+      - name: Wake Render Sites with Smart Timing
+        run: |
+          set -e
+          mkdir -p .cache
+          state_file=".cache/site_status.log"
+          meta_file=".cache/last_sent.log"
+          touch "$state_file" "$meta_file"
 
-def is_in_time_range(start, end):
-    now = iran_time().time()
-    return start <= now <= end
+          # 🕒 محاسبه ساعت ایران (UTC+3:30)
+          current_utc_hour=$(date -u +"%H")
+          current_utc_minute=$(date -u +"%M")
+          total_utc_minutes=$((10#$current_utc_hour * 60 + 10#$current_utc_minute))
+          total_iran_minutes=$(( (total_utc_minutes + 210) % 1440 )) # +3h30m offset
 
-def send_status(msg):
-    print(msg)
-    sys.stdout.flush()
+          iran_hour=$((total_iran_minutes / 60))
+          iran_minute=$((total_iran_minutes % 60))
+          printf "🕒 Iran time: %02d:%02d\n" $iran_hour $iran_minute
 
-def check_site_status(url):
-    """بررسی وضعیت سایت با پاسخ دقیق‌تر"""
-    try:
-        r = requests.get(url, timeout=10)
-        if r.status_code == 200:
-            # بررسی محتوا برای اطمینان از اینکه واقعا سایت بالا آمده
-            if "error" not in r.text.lower() and len(r.text) > 50:
-                return True
-        return False
-    except Exception:
-        return False
+          phone="989197934854"
+          apikey="4287648"
+          sites=(
+            "https://n8n-vn5b.onrender.com/"
+            "https://cl-s5ej.onrender.com/"
+            "https://bitbrief.click/"
+            "https://trrigeractive.onrender.com/"
+            "https://n8nyoutube-ullx.onrender.com/"
+            "https://n8nrunner.onrender.com/"
+            "https://kadoo.click/"
+            "https://crawl-f2mb.onrender.com/"
+            "https://server2-sy6g.onrender.com/health"
+            "https://neurobackend.onrender.com/"
+            "https://license-krks.onrender.com/"
+            "https://api1-nsqh.onrender.com/"
+          )
 
-def wake_sites():
-    for site in SITES:
-        send_status(f"🔹 Checking {site}")
-        attempts = 0
-        while attempts < MAX_ATTEMPTS:
-            if check_site_status(site):
-                send_status(f"✅ {site} is UP after {attempts+1} tries\n")
+          # 💤 بازه استراحت: 05:00–09:30 ایران
+          start_minutes=$((9 * 60 + 30))
+          stop_minutes=$((5 * 60))
+
+          function send_msg() {
+            msg="$1"
+            echo "$msg"
+            curl -G --data-urlencode "phone=$phone" \
+                  --data-urlencode "text=$msg" \
+                  --data-urlencode "apikey=$apikey" \
+                  "https://api.callmebot.com/whatsapp.php"
+          }
+
+          # ✅ پیام شروع (فقط یک‌بار در روز)
+          if [ $total_iran_minutes -ge $start_minutes ] && [ $total_iran_minutes -lt $((start_minutes + 5)) ]; then
+            if ! grep -q "$(date +%Y-%m-%d)-start" "$meta_file"; then
+              send_msg "🚀 Wake Bot started at 09:30 Iran time. Monitoring all Render servers now!"
+              echo "$(date +%Y-%m-%d)-start" >> "$meta_file"
+            fi
+          fi
+
+          # 🛑 پیام توقف (فقط یک‌بار در روز)
+          if [ $total_iran_minutes -ge $stop_minutes ] && [ $total_iran_minutes -lt $((stop_minutes + 5)) ]; then
+            if ! grep -q "$(date +%Y-%m-%d)-stop" "$meta_file"; then
+              send_msg "🛑 Wake Bot stopped at 05:00 Iran time. Entering rest mode (Render cooldown)."
+              echo "$(date +%Y-%m-%d)-stop" >> "$meta_file"
+            fi
+          fi
+
+          # 💤 اگر در زمان استراحت هست، چک نکن
+          if [ $total_iran_minutes -ge $stop_minutes ] && [ $total_iran_minutes -lt $start_minutes ]; then
+            echo "😴 Sleep mode (05:00–09:30 Iran). Skipping all checks."
+            exit 0
+          fi
+
+          # 🚀 اجرای چک سایت‌ها
+          echo "🟢 Active hours. Checking site status..."
+          summary="📊 Render Site Report:\n\n"
+
+          MAX_ATTEMPTS=15
+          for site in "${sites[@]}"; do
+            echo "🔹 Checking $site"
+            success=false
+            for i in $(seq 1 $MAX_ATTEMPTS); do
+              # دریافت وضعیت دقیق و بررسی محتوای اولیه برای تشخیص واقعی
+              status_code=$(curl -s -o /dev/null -w "%{http_code}" "$site")
+              body_preview=$(curl -s --max-time 8 "$site" | head -n 3)
+
+              if [[ "$status_code" =~ ^(200|301|302)$ ]] && [[ ! "$body_preview" =~ "Render Internal Error" ]] && [[ ! "$body_preview" =~ "starting" ]] && [[ ! "$body_preview" =~ "Booting" ]]; then
+                success=true
                 break
-            attempts += 1
-            time.sleep(CHECK_INTERVAL)
-        else:
-            send_status(f"❌ {site} FAILED to wake after {MAX_ATTEMPTS} tries\n")
+              fi
 
-def main():
-    now = iran_time()
-    time_str = now.strftime("%H:%M")
-    send_status(f"\n🕒 Iran time: {time_str}")
+              sleep 20
+            done
 
-    # بازه توقف
-    if is_in_time_range(*STOP_WINDOW[0]) or is_in_time_range(*STOP_WINDOW[-1]):
-        send_status("🟥 Stop window (05:00–05:04) → Sending STOP message")
-        return
+            if [ "$success" = true ]; then
+              summary+="$site → ✅ UP\n"
+              grep -v "^$site " "$state_file" > "$state_file.tmp" || true
+              mv "$state_file.tmp" "$state_file"
+              echo "$site up" >> "$state_file"
+            else
+              summary+="$site → ❌ DOWN\n"
+              grep -v "^$site " "$state_file" > "$state_file.tmp" || true
+              mv "$state_file.tmp" "$state_file"
+              echo "$site down" >> "$state_file"
+            fi
+          done
 
-    # ساعت فعال
-    if is_in_time_range(datetime.time(*ACTIVE_START), datetime.time(*ACTIVE_END)):
-        send_status("🟢 Active hours. Checking site status...\n")
-        wake_sites()
-    else:
-        send_status("⚪ Inactive hours. Waiting for next schedule.\n")
+          # 🕚 گزارش روزانه ساعت ۲۳:۵۰ ایران
+          if [ $iran_hour -eq 23 ] && [ $iran_minute -ge 50 ] && [ $iran_minute -lt 55 ]; then
+            if ! grep -q "$(date +%Y-%m-%d)-report" "$meta_file"; then
+              send_msg "🕓 Daily Report (23:50 Iran time)\n\n$summary"
+              echo "$(date +%Y-%m-%d)-report" >> "$meta_file"
+            fi
+          fi
 
-if __name__ == "__main__":
-    main()
+      - name: Save cache
+        uses: actions/cache@v3
+        with:
+          path: .cache/
+          key: site-state-${{ runner.os }}-v3
