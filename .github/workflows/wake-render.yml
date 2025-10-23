@@ -38,8 +38,6 @@ jobs:
             current_hour_iran=$((current_hour_iran + 1))
           fi
           current_hour_iran=$((current_hour_iran % 24))
-          # Iran date for flagging (YYYY-MM-DD)
-          # get UTC date and convert to Iran date safely:
           iran_date=$(date -u -d "${utc_now} +3 hours 30 minutes" '+%Y-%m-%d')
 
           echo "UTC now: $utc_now"
@@ -53,52 +51,37 @@ jobs:
             grep -q "^$1:$iran_date\$" "$sent_file" 2>/dev/null || return 1
           }
           write_flag_for_today() {
-            # remove previous same-key entries then append key:date
             grep -v "^$1:" "$sent_file" > "$sent_file.tmp" || true
             mv "$sent_file.tmp" "$sent_file" || true
             echo "$1:$iran_date" >> "$sent_file"
           }
 
-          # ---------- SEND STOP MESSAGE around 05:00 Iran (one-time per day) ----------
-          # window 05:00 - 05:04 (to tolerate small cron delays)
-          if [ "$current_hour_iran" -eq 5 ] && [ $current_minute_iran -ge 0 ] && [ $current_minute_iran -le 4 ]; then
-            if ! has_flag_for_today "stop_sent"; then
-              echo "Sending STOP message (05:00 window)..."
-              curl -s -G --data-urlencode "phone=$phone" \
-                    --data-urlencode "text=🛑 Bot stopped monitoring at 05:00 Iran time for daily rest (05:00–09:30)." \
-                    --data-urlencode "apikey=$apikey" \
-                    "https://api.callmebot.com/whatsapp.php" || true
-              write_flag_for_today "stop_sent"
-            else
-              echo "Stop message already sent today."
-            fi
-            # ensure we do not run checks during rest window
+          # ---------- REST period: 05:00 <= t < 09:30 ----------
+          rest_start_hour=5
+          rest_start_minute=0
+          rest_end_hour=9
+          rest_end_minute=30
+
+          # ---------- SEND STOP if in rest period and not sent ----------
+          if ! has_flag_for_today "stop_sent" && { [ $current_hour_iran -gt $rest_start_hour ] || { [ $current_hour_iran -eq $rest_start_hour ] && [ $current_minute_iran -ge $rest_start_minute ]; } } && { [ $current_hour_iran -lt $rest_end_hour ] || { [ $current_hour_iran -eq $rest_end_hour ] && [ $current_minute_iran -lt $rest_end_minute ]; } }; then
+            echo "Sending STOP message (rest period active)..."
+            curl -s -G --data-urlencode "phone=$phone" \
+                  --data-urlencode "text=🛑 Bot stopped monitoring for rest period (05:00–09:30)." \
+                  --data-urlencode "apikey=$apikey" \
+                  "https://api.callmebot.com/whatsapp.php" || true
+            write_flag_for_today "stop_sent"
             echo "Rest window active — exiting."
             exit 0
           fi
 
-          # ---------- Rest window: 05:00 <= t < 09:30 ----------
-          if [ $current_hour_iran -ge 5 ] && [ $current_hour_iran -lt 9 ]; then
-            echo "Rest period (05:00–09:30). Exiting."
-            exit 0
-          elif [ $current_hour_iran -eq 9 ] && [ $current_minute_iran -lt 30 ]; then
-            echo "Rest period (before 09:30). Exiting."
-            exit 0
-          fi
-
-          # ---------- SEND START MESSAGE around 09:30 Iran (one-time per day) ----------
-          # window 09:30 - 09:39 (to tolerate cron delays)
-          if [ "$current_hour_iran" -eq 9 ] && [ $current_minute_iran -ge 30 ] && [ $current_minute_iran -le 39 ]; then
-            if ! has_flag_for_today "start_sent"; then
-              echo "Sending START message (09:30 window)..."
-              curl -s -G --data-urlencode "phone=$phone" \
-                    --data-urlencode "text=🚀 Bot started daily monitoring at ~09:30 Iran time." \
-                    --data-urlencode "apikey=$apikey" \
-                    "https://api.callmebot.com/whatsapp.php" || true
-              write_flag_for_today "start_sent"
-            else
-              echo "Start message already sent today."
-            fi
+          # ---------- SEND START if rest period ended and not sent ----------
+          if ! has_flag_for_today "start_sent" && { [ $current_hour_iran -gt $rest_end_hour ] || { [ $current_hour_iran -eq $rest_end_hour ] && [ $current_minute_iran -ge $rest_end_minute ]; } }; then
+            echo "Sending START message (rest period ended)..."
+            curl -s -G --data-urlencode "phone=$phone" \
+                  --data-urlencode "text=🚀 Bot started monitoring after rest period (~09:30 Iran time)." \
+                  --data-urlencode "apikey=$apikey" \
+                  "https://api.callmebot.com/whatsapp.php" || true
+            write_flag_for_today "start_sent"
           fi
 
           echo "Active hours confirmed — running site checks now."
@@ -119,12 +102,9 @@ jobs:
             "https://api1-nsqh.onrender.com/"
           )
 
-          # summary accumulates statuses (for daily report)
           summary="📊 Daily Render Status Report ($iran_date):\n\n"
-
-          # ---------- PARAMETERS you can tune ----------
-          MAX_ATTEMPTS=10      # number of retries per site (reduced for timely runs)
-          SLEEP_BETWEEN=15     # seconds between attempts
+          MAX_ATTEMPTS=10
+          SLEEP_BETWEEN=15
 
           # ---------- iterate sites ----------
           for site in "${sites[@]}"; do
@@ -133,18 +113,15 @@ jobs:
             success=false
             while [ $attempts -lt $MAX_ATTEMPTS ]; do
               attempts=$((attempts+1))
-              # use -m 10 to bound curl time per try
               if curl -s -I -m 10 "$site" | grep -q -E "HTTP/[0-9.]+ (200|301|302)"; then
-                echo "  -> UP (after $attempts attempt(s))"
                 success=true
+                echo "  -> UP (after $attempts try)"
                 break
               else
                 echo "  -> attempt $attempts failed, sleeping ${SLEEP_BETWEEN}s..."
                 sleep $SLEEP_BETWEEN
               fi
             done
-
-            # update state file (replace previous line for this site)
             grep -v "^$site " "$state_file" > "$state_file.tmp" || true
             mv "$state_file.tmp" "$state_file" || true
             if [ "$success" = true ]; then
