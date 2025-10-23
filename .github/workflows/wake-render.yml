@@ -1,42 +1,109 @@
-name: Wake Render Sites (Smart Start/Stop + Daily WhatsApp Report)
+name: Wake Render Sites (Daily WhatsApp Report + Auto Wake - Robust)
 
 on:
   schedule:
-    - cron: '*/30 * * * *'   # هر ۳۰ دقیقه (UTC)
-  workflow_dispatch: {}       # اجرای دستی در صورت نیاز
+    - cron: '*/30 * * * *'  # هر نیم‌ساعت (UTC)
+  workflow_dispatch: {}
 
 jobs:
   wake:
     runs-on: ubuntu-latest
     steps:
-      - name: Restore state cache
+      # Persist entire .cache folder (site status + sent flags)
+      - name: Restore cache and flags
         uses: actions/cache@v3
         with:
-          path: .cache/
-          key: site-state-${{ runner.os }}-v3
+          path: .cache
+          key: site-status-${{ runner.os }}-v2
           restore-keys: |
-            site-state-${{ runner.os }}-v3
+            site-status-${{ runner.os }}-v2
 
-      - name: Wake Render Sites with Smart Timing
+      - name: Wake and Monitor Render Sites
         run: |
-          set -e
+          set -euo pipefail
           mkdir -p .cache
           state_file=".cache/site_status.log"
-          meta_file=".cache/last_sent.log"
-          touch "$state_file" "$meta_file"
+          sent_file=".cache/sent_flags.log"
+          touch "$state_file" "$sent_file"
 
-          # 🕒 محاسبه ساعت ایران (UTC+3:30)
-          current_utc_hour=$(date -u +"%H")
-          current_utc_minute=$(date -u +"%M")
-          total_utc_minutes=$((10#$current_utc_hour * 60 + 10#$current_utc_minute))
-          total_iran_minutes=$(( (total_utc_minutes + 210) % 1440 )) # +3h30m offset
+          # ---------- compute UTC and Iran time & date ----------
+          utc_now="$(date -u '+%Y-%m-%d %H:%M')"
+          current_hour_utc=$(date -u +"%H")
+          current_minute_utc=$(date -u +"%M")
+          # Iran = UTC + 3:30
+          current_hour_iran=$((10#$current_hour_utc + 3))
+          current_minute_iran=$((10#$current_minute_utc + 30))
+          if [ $current_minute_iran -ge 60 ]; then
+            current_minute_iran=$((current_minute_iran - 60))
+            current_hour_iran=$((current_hour_iran + 1))
+          fi
+          current_hour_iran=$((current_hour_iran % 24))
+          # Iran date for flagging (YYYY-MM-DD)
+          # get UTC date and convert to Iran date safely:
+          iran_date=$(date -u -d "${utc_now} +3 hours 30 minutes" '+%Y-%m-%d')
 
-          iran_hour=$((total_iran_minutes / 60))
-          iran_minute=$((total_iran_minutes % 60))
-          printf "🕒 Iran time: %02d:%02d\n" $iran_hour $iran_minute
+          echo "UTC now: $utc_now"
+          printf "Iran time: %s:%02d  (date %s)\n" "$current_hour_iran" "$current_minute_iran" "$iran_date"
 
           phone="989197934854"
           apikey="4287648"
+
+          # helper: check and write flag for today
+          has_flag_for_today() {
+            grep -q "^$1:$iran_date\$" "$sent_file" 2>/dev/null || return 1
+          }
+          write_flag_for_today() {
+            # remove previous same-key entries then append key:date
+            grep -v "^$1:" "$sent_file" > "$sent_file.tmp" || true
+            mv "$sent_file.tmp" "$sent_file" || true
+            echo "$1:$iran_date" >> "$sent_file"
+          }
+
+          # ---------- SEND STOP MESSAGE around 05:00 Iran (one-time per day) ----------
+          # window 05:00 - 05:04 (to tolerate small cron delays)
+          if [ "$current_hour_iran" -eq 5 ] && [ $current_minute_iran -ge 0 ] && [ $current_minute_iran -le 4 ]; then
+            if ! has_flag_for_today "stop_sent"; then
+              echo "Sending STOP message (05:00 window)..."
+              curl -s -G --data-urlencode "phone=$phone" \
+                    --data-urlencode "text=🛑 Bot stopped monitoring at 05:00 Iran time for daily rest (05:00–09:30)." \
+                    --data-urlencode "apikey=$apikey" \
+                    "https://api.callmebot.com/whatsapp.php" || true
+              write_flag_for_today "stop_sent"
+            else
+              echo "Stop message already sent today."
+            fi
+            # ensure we do not run checks during rest window
+            echo "Rest window active — exiting."
+            exit 0
+          fi
+
+          # ---------- Rest window: 05:00 <= t < 09:30 ----------
+          if [ $current_hour_iran -ge 5 ] && [ $current_hour_iran -lt 9 ]; then
+            echo "Rest period (05:00–09:30). Exiting."
+            exit 0
+          elif [ $current_hour_iran -eq 9 ] && [ $current_minute_iran -lt 30 ]; then
+            echo "Rest period (before 09:30). Exiting."
+            exit 0
+          fi
+
+          # ---------- SEND START MESSAGE around 09:30 Iran (one-time per day) ----------
+          # window 09:30 - 09:39 (to tolerate cron delays)
+          if [ "$current_hour_iran" -eq 9 ] && [ $current_minute_iran -ge 30 ] && [ $current_minute_iran -le 39 ]; then
+            if ! has_flag_for_today "start_sent"; then
+              echo "Sending START message (09:30 window)..."
+              curl -s -G --data-urlencode "phone=$phone" \
+                    --data-urlencode "text=🚀 Bot started daily monitoring at ~09:30 Iran time." \
+                    --data-urlencode "apikey=$apikey" \
+                    "https://api.callmebot.com/whatsapp.php" || true
+              write_flag_for_today "start_sent"
+            else
+              echo "Start message already sent today."
+            fi
+          fi
+
+          echo "Active hours confirmed — running site checks now."
+
+          # ---------- sites list ----------
           sites=(
             "https://n8n-vn5b.onrender.com/"
             "https://cl-s5ej.onrender.com/"
@@ -52,85 +119,61 @@ jobs:
             "https://api1-nsqh.onrender.com/"
           )
 
-          # 💤 بازه استراحت: 05:00–09:30 ایران
-          start_minutes=$((9 * 60 + 30))
-          stop_minutes=$((5 * 60))
+          # summary accumulates statuses (for daily report)
+          summary="📊 Daily Render Status Report ($iran_date):\n\n"
 
-          function send_msg() {
-            msg="$1"
-            echo "$msg"
-            curl -G --data-urlencode "phone=$phone" \
-                  --data-urlencode "text=$msg" \
-                  --data-urlencode "apikey=$apikey" \
-                  "https://api.callmebot.com/whatsapp.php"
-          }
+          # ---------- PARAMETERS you can tune ----------
+          MAX_ATTEMPTS=10      # number of retries per site (reduced for timely runs)
+          SLEEP_BETWEEN=15     # seconds between attempts
 
-          # ✅ پیام شروع (فقط یک‌بار در روز)
-          if [ $total_iran_minutes -ge $start_minutes ] && [ $total_iran_minutes -lt $((start_minutes + 5)) ]; then
-            if ! grep -q "$(date +%Y-%m-%d)-start" "$meta_file"; then
-              send_msg "🚀 Wake Bot started at 09:30 Iran time. Monitoring all Render servers now!"
-              echo "$(date +%Y-%m-%d)-start" >> "$meta_file"
-            fi
-          fi
-
-          # 🛑 پیام توقف (فقط یک‌بار در روز)
-          if [ $total_iran_minutes -ge $stop_minutes ] && [ $total_iran_minutes -lt $((stop_minutes + 5)) ]; then
-            if ! grep -q "$(date +%Y-%m-%d)-stop" "$meta_file"; then
-              send_msg "🛑 Wake Bot stopped at 05:00 Iran time. Entering rest mode (Render cooldown)."
-              echo "$(date +%Y-%m-%d)-stop" >> "$meta_file"
-            fi
-          fi
-
-          # 💤 اگر در زمان استراحت هست، چک نکن
-          if [ $total_iran_minutes -ge $stop_minutes ] && [ $total_iran_minutes -lt $start_minutes ]; then
-            echo "😴 Sleep mode (05:00–09:30 Iran). Skipping all checks."
-            exit 0
-          fi
-
-          # 🚀 اجرای چک سایت‌ها
-          echo "🟢 Active hours. Checking site status..."
-          summary="📊 Render Site Report:\n\n"
-
-          MAX_ATTEMPTS=15
+          # ---------- iterate sites ----------
           for site in "${sites[@]}"; do
-            echo "🔹 Checking $site"
+            echo "Checking: $site"
+            attempts=0
             success=false
-            for i in $(seq 1 $MAX_ATTEMPTS); do
-              # دریافت وضعیت دقیق و بررسی محتوای اولیه برای تشخیص واقعی
-              status_code=$(curl -s -o /dev/null -w "%{http_code}" "$site")
-              body_preview=$(curl -s --max-time 8 "$site" | head -n 3)
-
-              if [[ "$status_code" =~ ^(200|301|302)$ ]] && [[ ! "$body_preview" =~ "Render Internal Error" ]] && [[ ! "$body_preview" =~ "starting" ]] && [[ ! "$body_preview" =~ "Booting" ]]; then
+            while [ $attempts -lt $MAX_ATTEMPTS ]; do
+              attempts=$((attempts+1))
+              # use -m 10 to bound curl time per try
+              if curl -s -I -m 10 "$site" | grep -q -E "HTTP/[0-9.]+ (200|301|302)"; then
+                echo "  -> UP (after $attempts attempt(s))"
                 success=true
                 break
+              else
+                echo "  -> attempt $attempts failed, sleeping ${SLEEP_BETWEEN}s..."
+                sleep $SLEEP_BETWEEN
               fi
-
-              sleep 20
             done
 
+            # update state file (replace previous line for this site)
+            grep -v "^$site " "$state_file" > "$state_file.tmp" || true
+            mv "$state_file.tmp" "$state_file" || true
             if [ "$success" = true ]; then
-              summary+="$site → ✅ UP\n"
-              grep -v "^$site " "$state_file" > "$state_file.tmp" || true
-              mv "$state_file.tmp" "$state_file"
               echo "$site up" >> "$state_file"
+              summary+="$site → ✅ UP (after ${attempts} try)\n"
             else
-              summary+="$site → ❌ DOWN\n"
-              grep -v "^$site " "$state_file" > "$state_file.tmp" || true
-              mv "$state_file.tmp" "$state_file"
               echo "$site down" >> "$state_file"
+              summary+="$site → ❌ DOWN (after ${attempts} tries)\n"
             fi
           done
 
-          # 🕚 گزارش روزانه ساعت ۲۳:۵۰ ایران
-          if [ $iran_hour -eq 23 ] && [ $iran_minute -ge 50 ] && [ $iran_minute -lt 55 ]; then
-            if ! grep -q "$(date +%Y-%m-%d)-report" "$meta_file"; then
-              send_msg "🕓 Daily Report (23:50 Iran time)\n\n$summary"
-              echo "$(date +%Y-%m-%d)-report" >> "$meta_file"
+          # ---------- DAILY SUMMARY at 23:50 Iran (one-time) ----------
+          if [ "$current_hour_iran" -eq 23 ] && [ $current_minute_iran -ge 50 ]; then
+            if ! has_flag_for_today "daily_sent"; then
+              echo "Sending daily summary..."
+              curl -s -G --data-urlencode "phone=$phone" \
+                    --data-urlencode "text=$summary" \
+                    --data-urlencode "apikey=$apikey" \
+                    "https://api.callmebot.com/whatsapp.php" || true
+              write_flag_for_today "daily_sent"
+            else
+              echo "Daily summary already sent today."
             fi
+          else
+            echo "Not time for daily summary yet."
           fi
 
-      - name: Save cache
+      - name: Save cache and flags
         uses: actions/cache@v3
         with:
-          path: .cache/
-          key: site-state-${{ runner.os }}-v3
+          path: .cache
+          key: site-status-${{ runner.os }}-v2
