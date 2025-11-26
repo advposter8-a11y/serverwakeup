@@ -50,6 +50,10 @@ jobs:
             "https://neurobackend.onrender.com/"
             "https://license-krks.onrender.com/"
             "https://api1-nsqh.onrender.com/"
+            "https://bitbriefclawl.onrender.com/health"
+            "https://indexkadoo.onrender.com/health"
+            "https://bitbriefclawl.onrender.com/crawl-bitbrief"
+            "https://indexkadoo.onrender.com/crawl-kadoo"
           )
 
           # 💤 بازه استراحت: 05:00–09:30 ایران
