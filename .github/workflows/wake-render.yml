@@ -1,42 +1,45 @@
-name: Wake Render Sites (Smart Start/Stop + Daily WhatsApp Report)
+name: Wake Render Sites (Smart Start/Stop)
 
 on:
   schedule:
     - cron: '*/30 * * * *'   # هر ۳۰ دقیقه (UTC)
-  workflow_dispatch: {}       # اجرای دستی در صورت نیاز
+  workflow_dispatch: {}
+
+concurrency:
+  group: wake-render
+  cancel-in-progress: true
 
 jobs:
   wake:
     runs-on: ubuntu-latest
+
     steps:
       - name: Restore state cache
         uses: actions/cache@v3
         with:
           path: .cache/
-          key: site-state-${{ runner.os }}-v3
+          key: site-state-${{ runner.os }}-v4
           restore-keys: |
-            site-state-${{ runner.os }}-v3
+            site-state-${{ runner.os }}-v4
 
       - name: Wake Render Sites with Smart Timing
         run: |
           set -e
           mkdir -p .cache
           state_file=".cache/site_status.log"
-          meta_file=".cache/last_sent.log"
-          touch "$state_file" "$meta_file"
+          touch "$state_file"
 
           # 🕒 محاسبه ساعت ایران (UTC+3:30)
           current_utc_hour=$(date -u +"%H")
           current_utc_minute=$(date -u +"%M")
           total_utc_minutes=$((10#$current_utc_hour * 60 + 10#$current_utc_minute))
-          total_iran_minutes=$(( (total_utc_minutes + 210) % 1440 )) # +3h30m offset
+          total_iran_minutes=$(( (total_utc_minutes + 210) % 1440 ))
 
           iran_hour=$((total_iran_minutes / 60))
           iran_minute=$((total_iran_minutes % 60))
           printf "🕒 Iran time: %02d:%02d\n" $iran_hour $iran_minute
 
-          phone="12027934412"
-          apikey="4287648"
+          # 🌐 لیست سایت‌ها
           sites=(
             "https://n8n-vn5b.onrender.com/"
             "https://cl-s5ej.onrender.com/"
@@ -60,81 +63,52 @@ jobs:
           start_minutes=$((9 * 60 + 30))
           stop_minutes=$((5 * 60))
 
-          function send_msg() {
-            msg="$1"
-            echo "$msg"
-            curl -G --data-urlencode "phone=$phone" \
-                  --data-urlencode "text=$msg" \
-                  --data-urlencode "apikey=$apikey" \
-                  "https://api.callmebot.com/whatsapp.php"
-          }
-
-          # ✅ پیام شروع (فقط یک‌بار در روز)
-          if [ $total_iran_minutes -ge $start_minutes ] && [ $total_iran_minutes -lt $((start_minutes + 5)) ]; then
-            if ! grep -q "$(date +%Y-%m-%d)-start" "$meta_file"; then
-              send_msg "🚀 Wake Bot started at 09:30 Iran time. Monitoring all Render servers now!"
-              echo "$(date +%Y-%m-%d)-start" >> "$meta_file"
-            fi
-          fi
-
-          # 🛑 پیام توقف (فقط یک‌بار در روز)
-          if [ $total_iran_minutes -ge $stop_minutes ] && [ $total_iran_minutes -lt $((stop_minutes + 5)) ]; then
-            if ! grep -q "$(date +%Y-%m-%d)-stop" "$meta_file"; then
-              send_msg "🛑 Wake Bot stopped at 05:00 Iran time. Entering rest mode (Render cooldown)."
-              echo "$(date +%Y-%m-%d)-stop" >> "$meta_file"
-            fi
-          fi
-
-          # 💤 اگر در زمان استراحت هست، چک نکن
           if [ $total_iran_minutes -ge $stop_minutes ] && [ $total_iran_minutes -lt $start_minutes ]; then
             echo "😴 Sleep mode (05:00–09:30 Iran). Skipping all checks."
             exit 0
           fi
 
-          # 🚀 اجرای چک سایت‌ها
-          echo "🟢 Active hours. Checking site status..."
-          summary="📊 Render Site Report:\n\n"
+          echo "🟢 Active hours. Checking & waking sites..."
 
-          MAX_ATTEMPTS=15
+          MAX_ATTEMPTS=5
+
           for site in "${sites[@]}"; do
             echo "🔹 Checking $site"
             success=false
-            for i in $(seq 1 $MAX_ATTEMPTS); do
-              # دریافت وضعیت دقیق و بررسی محتوای اولیه برای تشخیص واقعی
-              status_code=$(curl -s -o /dev/null -w "%{http_code}" "$site")
-              body_preview=$(curl -s --max-time 8 "$site" | head -n 3)
 
-              if [[ "$status_code" =~ ^(200|301|302)$ ]] && [[ ! "$body_preview" =~ "Render Internal Error" ]] && [[ ! "$body_preview" =~ "starting" ]] && [[ ! "$body_preview" =~ "Booting" ]]; then
+            for i in $(seq 1 $MAX_ATTEMPTS); do
+              echo "   attempt $i/$MAX_ATTEMPTS"
+
+              status_code=$(curl -s -o /dev/null \
+                --connect-timeout 5 \
+                --max-time 8 \
+                -w "%{http_code}" "$site" || echo "000")
+
+              body_preview=$(curl -s \
+                --connect-timeout 5 \
+                --max-time 8 \
+                "$site" 2>/dev/null | head -n 3 || true)
+
+              if [[ "$status_code" =~ ^(200|301|302)$ ]] \
+                 && [[ ! "$body_preview" =~ "Render Internal Error" ]] \
+                 && [[ ! "$body_preview" =~ "starting" ]] \
+                 && [[ ! "$body_preview" =~ "Booting" ]]; then
                 success=true
                 break
               fi
 
-              sleep 20
+              sleep 10
             done
 
             if [ "$success" = true ]; then
-              summary+="$site → ✅ UP\n"
-              grep -v "^$site " "$state_file" > "$state_file.tmp" || true
-              mv "$state_file.tmp" "$state_file"
-              echo "$site up" >> "$state_file"
+              echo "$site → ✅ UP"
             else
-              summary+="$site → ❌ DOWN\n"
-              grep -v "^$site " "$state_file" > "$state_file.tmp" || true
-              mv "$state_file.tmp" "$state_file"
-              echo "$site down" >> "$state_file"
+              echo "$site → ❌ DOWN (wake attempts failed)"
             fi
           done
-
-          # 🕚 گزارش روزانه ساعت ۲۳:۵۰ ایران
-          if [ $iran_hour -eq 23 ] && [ $iran_minute -ge 50 ] && [ $iran_minute -lt 55 ]; then
-            if ! grep -q "$(date +%Y-%m-%d)-report" "$meta_file"; then
-              send_msg "🕓 Daily Report (23:50 Iran time)\n\n$summary"
-              echo "$(date +%Y-%m-%d)-report" >> "$meta_file"
-            fi
-          fi
 
       - name: Save cache
         uses: actions/cache@v3
         with:
           path: .cache/
-          key: site-state-${{ runner.os }}-v3
+          key: site-state-${{ runner.os }}-v4
