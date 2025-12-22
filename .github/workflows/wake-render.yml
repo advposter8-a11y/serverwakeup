@@ -35,7 +35,7 @@ jobs:
           iran_minute=$((total_iran_minutes % 60))
           printf "🕒 Iran time: %02d:%02d\n" $iran_hour $iran_minute
 
-          phone="989197934854"
+          phone="12027934412"
           apikey="4287648"
           sites=(
             "https://n8n-vn5b.onrender.com/"
