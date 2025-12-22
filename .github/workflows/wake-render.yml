@@ -70,7 +70,7 @@ jobs:
 
           echo "🟢 Active hours. Checking & waking sites..."
 
-          MAX_ATTEMPTS=5
+          MAX_ATTEMPTS=15
 
           for site in "${sites[@]}"; do
             echo "🔹 Checking $site"
