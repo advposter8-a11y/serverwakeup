@@ -41,6 +41,7 @@ jobs:
 
           # 🌐 لیست سایت‌ها
           sites=(
+            "https://puppeteer-18ko.onrender.com/health"
             "https://n8n-vn5b.onrender.com/"
             "https://cl-s5ej.onrender.com/"
             "https://bitbrief.click/"
